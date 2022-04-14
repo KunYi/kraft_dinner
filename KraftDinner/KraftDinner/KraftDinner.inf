@@ -4,8 +4,8 @@
 
 [Version]
 Signature="$WINDOWS NT$"
-Class=Sample ; TODO: edit Class
-ClassGuid={78A1C341-4539-11d3-B88D-00C04FAD5171} ; TODO: edit ClassGuid
+Class=HackClass ; TODO: edit Class
+ClassGuid={EE8FCFE3-322D-4034-B123-2688A318A6CC} ; TODO: edit ClassGuid
 Provider=%ManufacturerName%
 CatalogFile=KraftDinner.cat
 DriverVer= ; TODO: set DriverVer in stampinf property pages

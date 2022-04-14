@@ -30,6 +30,59 @@
 //
 #pragma code_seg("PAGE")
 
+#if (NTDDI_VERSION < NTDDI_WINBLUE)
+// the below copy fomr ntddk.h
+#pragma warning(push)
+#pragma warning(disable:4201) // nameless struct/union
+typedef struct _MM_COPY_ADDRESS {
+    union {
+        PVOID            VirtualAddress;
+        PHYSICAL_ADDRESS PhysicalAddress;
+    };
+} MM_COPY_ADDRESS, *PMMCOPY_ADDRESS;
+#pragma warning(pop)
+
+#define MM_COPY_MEMORY_PHYSICAL             0x1
+#define MM_COPY_MEMORY_VIRTUAL              0x2
+#endif
+
+typedef NTSTATUS(*PFN_MmCopyMemory)(PVOID, MM_COPY_ADDRESS, SIZE_T, ULONG, PSIZE_T);
+
+// API function from ntoskrnl.exe which we use
+// to copy memory to and from an user process.
+NTSTATUS NTAPI MmCopyVirtualMemory
+(
+    PEPROCESS SourceProcess,
+    PVOID SourceAddress,
+    PEPROCESS TargetProcess,
+    PVOID TargetAddress,
+    SIZE_T BufferSize,
+    KPROCESSOR_MODE PreviousMode,
+    PSIZE_T ReturnSize
+);
+
+NTKERNELAPI
+NTSTATUS
+PsLookupProcessByProcessId(
+    _In_ HANDLE ProcessId,
+    _Outptr_ PEPROCESS* Process
+);
+
+NTSTATUS KeReadProcessMemory(PEPROCESS Process, PVOID SourceAddress, PVOID TargetAddress, SIZE_T Size)
+{
+    // Since the process we are reading from is the input process, we set
+    // the source process variable for that.
+    PEPROCESS SourceProcess = Process;
+    // Since the "process" we read the output to is this driver
+    // we set the target process as the current module.
+    PEPROCESS TargetProcess = PsGetCurrentProcess();
+    SIZE_T Result;
+    if (NT_SUCCESS(MmCopyVirtualMemory(SourceProcess, SourceAddress, TargetProcess, TargetAddress, Size, KernelMode, &Result)))
+        return STATUS_SUCCESS; // operation was successful
+    else
+        return STATUS_ACCESS_DENIED;
+}
+
 //
 // Windows' HalEfiRuntimeServicesBlock
 //
@@ -254,6 +307,28 @@ FindHalEfiRuntimeServicesBlockByDirty (
         goto Exit;
     }
 
+    PEPROCESS Process = NULL;
+    PFN_MmCopyMemory pfnMmCopyMemory = NULL;
+
+    if (RtlIsNtDdiVersionAvailable(NTDDI_WINBLUE)) {
+        // Win8.1 support MmCopyMemory
+        DECLARE_CONST_UNICODE_STRING(usMmCopyMemory, L"MmCopyMemory");
+        pfnMmCopyMemory = (PFN_MmCopyMemory)MmGetSystemRoutineAddress((PUNICODE_STRING)&usMmCopyMemory);
+        if (pfnMmCopyMemory == NULL) {
+            KD_ERROR("get MmCopyMemory failed");
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
+        }
+    }
+    else {
+        // to lookup (ntoskrnl.exe, pid 4)
+        status = PsLookupProcessByProcessId((HANDLE)4, &Process);
+        if (!NT_SUCCESS(status)) {
+            KD_ERROR("PsLookupProcessByProcessId failed, status: 0x%x", status);
+            status = STATUS_NOT_FOUND;
+            goto Exit;
+        }
+    }
     //
     // Go over at most 80 bytes (10 pointers) from the beginning of the section.
     //
@@ -279,12 +354,19 @@ FindHalEfiRuntimeServicesBlockByDirty (
         // If so, attempt to capture the contents of the address. This may be
         // HalEfiRuntimeServicesBlock.
         //
-        sourceAddress.VirtualAddress = (void*)cfgroSection[i];
-        status2 = MmCopyMemory(&maybe,
-                               sourceAddress,
-                               sizeof(maybe),
-                               MM_COPY_MEMORY_VIRTUAL,
-                               &numberOfBytesTransferred);
+        if (RtlIsNtDdiVersionAvailable(NTDDI_WINBLUE)) {
+            sourceAddress.VirtualAddress = (void*)cfgroSection[i];
+            status2 = pfnMmCopyMemory(&maybe,
+                    sourceAddress,
+                    sizeof(maybe),
+                    MM_COPY_MEMORY_VIRTUAL,
+                    &numberOfBytesTransferred);
+
+        }
+        else {
+            status2 = KeReadProcessMemory(Process, &maybe, (PVOID)cfgroSection[i], sizeof(maybe));
+        }
+
         if (!NT_SUCCESS(status2))
         {
             continue;
@@ -762,9 +844,10 @@ DriverEntry (
         goto Exit;
     }
 
-    if (version.dwMajorVersion < 10)
+    if ((version.dwMajorVersion < 6)
+        || ((version.dwMajorVersion == 6) && (version.dwMinorVersion < 1)))
     {
-        KD_ERROR("Unsupported OS version. Only Windows 10 / Server 2019 or later is supported");
+        KD_ERROR("Unsupported OS version. Only Windows 7 and later is supported");
         status = STATUS_NOT_SUPPORTED;
         goto Exit;
     }
